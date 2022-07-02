@@ -1,12 +1,22 @@
 package main
 
 import (
-	"github.com/mysql-file-tool/fileparser"
+	"flag"
+	"github.com/go-inno-reader/fileparser"
 	"os"
 )
 
+var (
+	filePath = flag.String("path", "", "file path")
+)
+
 func main() {
-	file, err := os.Open("/Users/cloudjjcc/CLionProjects/mysql-server/cmake-build-debug/data/testdb1/tt1.ibd")
+	flag.Parse()
+	if *filePath == "" {
+		flag.Usage()
+		return
+	}
+	file, err := os.Open(*filePath)
 	if err != nil {
 		panic("open file failed:" + err.Error())
 	}
