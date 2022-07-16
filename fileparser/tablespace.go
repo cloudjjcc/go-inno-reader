@@ -5,114 +5,20 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
-	"math"
 	"os"
 )
 
 func init() {
-	assertBinarySize(INodeEntry{}, INodeEntrySize)
-	assertBinarySize(FilHeader{}, FilHeaderSize)
-	assertBinarySize(FSegHeader{}, FSegHeaderSize)
-	assertBinarySize(PageHeader{}, PageHeaderSize)
-}
-
-type PageNo uint32
-
-const (
-	PageSize                     = 16 * 1024
-	PageOffsetFilPageType        = 24
-	PageOffsetFilPageData        = 38
-	PageOffsetXDESEntry          = 150
-	PageOffsetFSegArr            = 50
-	FilHeaderSize                = 38
-	FLSTNodeSize                 = 12
-	FLSTBaseNodeSize             = 16
-	INodeEntrySize               = 192
-	FspSegInodesPerPage          = 85
-	PageHeaderSize               = 56
-	FSegHeaderSize               = 10
-	FilNull               PageNo = math.MaxUint32
-	FSegMagicNValue              = 97937874
-)
-
-type FilPageType uint16
-
-const (
-	PageTypeAllocated  FilPageType = 0
-	PageTypeUndoLog    FilPageType = 2
-	PageTypeINode      FilPageType = 3
-	PageTypeIBufBitmap FilPageType = 5
-	PageTypeFSPHDR     FilPageType = 8
-	PageTypeXDES       FilPageType = 9
-	PageTypeIndex      FilPageType = 17855
-	PageTypeSDI        FilPageType = 17853
-)
-
-type FilHeader struct {
-	FilPageSizeOrChecksum uint32
-	FilPageOffset         PageNo
-	FilPagePre            PageNo
-	FilPageNext           PageNo
-	FilPageLSN            uint64
-	FilPageType           FilPageType
-	FilPageFileFlushLSN   uint8
-	FilPageAlgorithmV1    uint8
-	FilPageOriginalTypeV1 uint16
-	FilPageOriginalSizeV1 uint16
-	FilPageCompressSizeV1 uint16
-	FilPageSpaceId        uint32
-}
-type FilAddress struct {
-	PageNo PageNo
-	Offset uint16
-}
-type FLSTBaseNode struct {
-	Len         uint32
-	First, Last FilAddress
-}
-type FLSTNode struct {
-	Prev, Next FilAddress
-}
-type FSPHeader struct {
-	FSPSpaceID       uint32
-	FSPNotUse        uint32
-	FSPSize          uint32
-	FSPFreeLimit     uint32
-	FSPSpaceFlags    uint32
-	FSPFragNUsed     uint32
-	FSPFree          FLSTBaseNode
-	FSPFreeFrag      FLSTBaseNode
-	FSPFullFrag      FLSTBaseNode
-	FSPSegID         uint64
-	FSPSegInodesFull FLSTBaseNode
-	FSPSegInodesFree FLSTBaseNode
-}
-type PageHeader struct {
-	PageNDirSlots  uint16
-	PageHeapTop    uint16
-	PageNHeap      uint16
-	PageFree       uint16
-	PageGarbage    uint16
-	PageLastInsert uint16
-	PageDirection  uint16
-	PageNDirection uint16
-	PageNRecs      uint16
-	PageMaxTrxID   uint64
-	PageLevel      uint16
-	PageIndexID    uint64
-	PageBtrSegLeaf FSegHeader
-	PageBtrSegTop  FSegHeader
-}
-type FSegHeader struct {
-	FSegHdrSpace  uint32
-	FSegHdrPageNo uint32
-	FSegHdrOffset uint16
+	assertBinarySize(INodeEntry{}, SizeOfINodeEntry)
+	assertBinarySize(FilHeader{}, SizeOfFilHeader)
+	assertBinarySize(FSegHeader{}, SizeOfFSegHeader)
+	assertBinarySize(IndexHeader{}, SizeOfIndexHeader)
 }
 
 var mysqlByteOrder = binary.BigEndian
 
-func ReadPage(file *os.File) ([]byte, error) {
-	page := make([]byte, PageSize)
+func ReadPageFrame(file *os.File) ([]byte, error) {
+	page := make([]byte, SizeOfPage)
 	_, err := file.Read(page)
 	return page, err
 }
@@ -138,7 +44,7 @@ type INodeEntry struct {
 
 func Parse(file *os.File) {
 	for {
-		page, err := ReadPage(file)
+		page, err := ReadPageFrame(file)
 		if err != nil {
 			log.Printf("read page failed:%v", err)
 			return
@@ -149,12 +55,21 @@ func Parse(file *os.File) {
 			log.Printf("read fil header failed:%v", err)
 			return
 		}
+		filTrailer := new(FilTrailer)
+		_, _ = pageReader.Seek(SizeOfPage-SizeOfFilTrailer, io.SeekStart)
+		if err := binary.Read(pageReader, mysqlByteOrder, filTrailer); err != nil {
+			log.Printf("read fil trailer failed:%v", err)
+			return
+		}
+		if filTrailer.Low32LSN != uint32(filHeader.FilPageLSN&0xffffffff) {
+			log.Printf("lsn not match")
+			return
+		}
 		switch filHeader.FilPageType {
 		case PageTypeFSPHDR:
 			log.Printf("page type hdr\n")
 			fspHeader := new(FSPHeader)
 			_, _ = pageReader.Seek(PageOffsetFilPageData, io.SeekStart)
-			//reader := bytes.NewReader(page[PageOffsetFilPageData:])
 			if err := binary.Read(pageReader, mysqlByteOrder, fspHeader); err != nil {
 				log.Printf("read fsp header failed:%v", err)
 				return
@@ -179,17 +94,19 @@ func Parse(file *os.File) {
 			for i := 0; i < FspSegInodesPerPage; i++ {
 				if err := binary.Read(pageReader, mysqlByteOrder, &inodeEntry); err != nil {
 					log.Printf("read inode entry:%v failed:%v", i, err)
+					continue
 				}
 				log.Printf("inode entry:%+v", inodeEntry)
 			}
 		case PageTypeIndex:
 			log.Printf("page type index\n")
 			_, _ = pageReader.Seek(PageOffsetFilPageData, io.SeekStart)
-			var pageHeader PageHeader
-			if err := binary.Read(pageReader, mysqlByteOrder, &pageHeader); err != nil {
-				log.Printf("read page header failed:%v", err)
+			index, err := ReadIndex(pageReader)
+			if err != nil {
+				log.Printf("read index failed:%v", err)
+				continue
 			}
-			log.Printf("page header:%+v", pageHeader)
+			log.Printf("index header:%s", index.IndexHeader.String())
 		case PageTypeUndoLog:
 			log.Printf("page type undo log\n")
 		case PageTypeSDI:
