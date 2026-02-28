@@ -2,8 +2,9 @@ package main
 
 import (
 	"flag"
-	"github.com/go-inno-reader/fileparser"
 	"os"
+
+	"github.com/go-inno-reader/fileparser"
 )
 
 var (
@@ -23,5 +24,6 @@ func main() {
 	defer func() {
 		_ = file.Close()
 	}()
+
 	fileparser.Parse(file)
 }

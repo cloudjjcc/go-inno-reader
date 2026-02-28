@@ -1,118 +1,78 @@
 package fileparser
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/binary"
-	"io"
+	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 func init() {
-	assertBinarySize(INodeEntry{}, SizeOfINodeEntry)
-	assertBinarySize(FilHeader{}, SizeOfFilHeader)
-	assertBinarySize(FSegHeader{}, SizeOfFSegHeader)
-	assertBinarySize(IndexHeader{}, SizeOfIndexHeader)
+	assertStructSize(INodeEntry{}, SizeOfINodeEntry)
+	assertStructSize(FilHeader{}, SizeOfFilHeader)
+	assertStructSize(FSegHeader{}, SizeOfFSegHeader)
+	assertStructSize(IndexHeader{}, SizeOfIndexHeader)
 }
 
 var mysqlByteOrder = binary.BigEndian
 
-func ReadPageFrame(file *os.File) ([]byte, error) {
+// ReadRawPageAt 读取指定页的数据
+func ReadRawPageAt(file *os.File, pageNo PageNo) (*RawPage, error) {
+	offset := int64(pageNo * SizeOfPage)
 	page := make([]byte, SizeOfPage)
-	_, err := file.Read(page)
-	return page, err
+	_, err := file.ReadAt(page, offset)
+	if err != nil {
+		return nil, err
+	}
+	return NewRawPage(page), err
 }
 func ReadPageType(page []byte) FilPageType {
 	return FilPageType(mysqlByteOrder.Uint16(page[PageOffsetFilPageType:]))
 }
 
-type XDESEntry struct {
-	XDESID          uint64
-	XDESFLSTNode    FLSTNode
-	XDESState       uint32
-	XDESStateBitmap [16]byte
-}
-type INodeEntry struct {
-	FSegID           uint64
-	FSegNotNullNUsed uint32
-	FSegFree         FLSTBaseNode
-	FSegNotNull      FLSTBaseNode
-	FSegFull         FLSTBaseNode
-	FSegMagicN       uint32
-	FSegFragArr      [32]uint32
-}
-
 func Parse(file *os.File) {
+	pageNo := PageNo(0)
+	reader := bufio.NewReader(os.Stdin)
 	for {
-		page, err := ReadPageFrame(file)
+		page, err := ReadRawPageAt(file, pageNo)
 		if err != nil {
-			log.Printf("read page failed:%v", err)
+			fmt.Println("read page failed:", err)
 			return
 		}
-		pageReader := bytes.NewReader(page)
-		filHeader := new(FilHeader)
-		if err := binary.Read(pageReader, mysqlByteOrder, filHeader); err != nil {
-			log.Printf("read fil header failed:%v", err)
-			return
-		}
-		filTrailer := new(FilTrailer)
-		_, _ = pageReader.Seek(SizeOfPage-SizeOfFilTrailer, io.SeekStart)
-		if err := binary.Read(pageReader, mysqlByteOrder, filTrailer); err != nil {
-			log.Printf("read fil trailer failed:%v", err)
-			return
-		}
+		filHeader := page.ReadFilHeader()
+		filTrailer := page.ReadFilTrailer()
+		// check LSN
 		if filTrailer.Low32LSN != uint32(filHeader.FilPageLSN&0xffffffff) {
 			log.Printf("lsn not match")
 			return
 		}
-		switch filHeader.FilPageType {
-		case PageTypeFSPHDR:
-			log.Printf("page type hdr\n")
-			fspHeader := new(FSPHeader)
-			_, _ = pageReader.Seek(PageOffsetFilPageData, io.SeekStart)
-			if err := binary.Read(pageReader, mysqlByteOrder, fspHeader); err != nil {
-				log.Printf("read fsp header failed:%v", err)
-				return
+		// print page base info
+		fmt.Printf("\n--- Page %d ---\n", pageNo)
+		fmt.Printf("PageType: %s\n", filHeader.FilPageType)
+		fmt.Printf("SpaceID: %d\n", filHeader.FilPageSpaceId)
+		fmt.Printf("PageLSN: %d\n", filHeader.FilPageLSN)
+		// print help info
+		fmt.Println("\ninput command(n=next page,p=prev page,q=quit)\n", file.Name())
+
+		fmt.Print(">>> ")
+		cmd, _ := reader.ReadString('\n')
+		cmd = strings.TrimSpace(cmd)
+		switch cmd {
+		case "n":
+			pageNo++
+		case "p":
+			if pageNo > 0 {
+				pageNo--
+			} else {
+				fmt.Println("already first page")
 			}
-			_, _ = pageReader.Seek(PageOffsetXDESEntry, io.SeekStart)
-			var xdesEntry XDESEntry
-			for i := 0; i < 256; i++ {
-				if err := binary.Read(pageReader, mysqlByteOrder, &xdesEntry); err != nil {
-					log.Printf("read xdes entry failed:%v", err)
-					break
-				}
-				log.Printf("xdes entry:%+v", xdesEntry)
-			}
-		case PageTypeIBufBitmap:
-			log.Printf("page type ibufbitmap\n")
-		case PageTypeXDES:
-			log.Printf("page type xdes\n")
-		case PageTypeINode:
-			log.Printf("page type inode\n")
-			_, _ = pageReader.Seek(PageOffsetFSegArr, io.SeekStart)
-			var inodeEntry INodeEntry
-			for i := 0; i < FspSegInodesPerPage; i++ {
-				if err := binary.Read(pageReader, mysqlByteOrder, &inodeEntry); err != nil {
-					log.Printf("read inode entry:%v failed:%v", i, err)
-					continue
-				}
-				log.Printf("inode entry:%+v", inodeEntry)
-			}
-		case PageTypeIndex:
-			log.Printf("page type index\n")
-			_, _ = pageReader.Seek(PageOffsetFilPageData, io.SeekStart)
-			index, err := ReadIndex(pageReader)
-			if err != nil {
-				log.Printf("read index failed:%v", err)
-				continue
-			}
-			log.Printf("index header:%s", index.IndexHeader.String())
-		case PageTypeUndoLog:
-			log.Printf("page type undo log\n")
-		case PageTypeSDI:
-			log.Printf("page type sdi")
+		case "q":
+			fmt.Println("quit")
 		default:
-			log.Printf("page type unkown\n")
+			fmt.Println("unknown command:", cmd)
+			break
 		}
 	}
 }

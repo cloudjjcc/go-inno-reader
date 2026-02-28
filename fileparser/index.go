@@ -4,88 +4,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math"
 )
 
-type PageNo uint32
+type SystemRecord struct {
+	RecordHeader
+	Data [8]byte
+}
+type RecordHeader struct {
+	InfoFlagsAndNRecOwned uint8
+	OrderAndRecordType    uint16
+	NextRecordOffset      uint16
+}
 
-const (
-	SizeOfPage         = 16 * 1024
-	SizeOfFilHeader    = 38
-	SizeOfFilTrailer   = 8
-	SizeOfFLSTNode     = 12
-	SizeOfFLSTBaseNode = 16
-	SizeOfINodeEntry   = 192
-	SizeOfIndexHeader  = 36
-	SizeOfFSegHeader   = 10
-	SizeOfPageDirSlot  = 2
-)
-const (
-	PageOffsetFilPageType        = 24
-	PageOffsetFilPageData        = 38
-	PageOffsetXDESEntry          = 150
-	PageOffsetFSegArr            = 50
-	FspSegInodesPerPage          = 85
-	FilNull               PageNo = math.MaxUint32
-	FSegMagicNValue              = 97937874
-)
-
-type FilPageType uint16
-
-const (
-	PageTypeAllocated  FilPageType = 0
-	PageTypeUndoLog    FilPageType = 2
-	PageTypeINode      FilPageType = 3
-	PageTypeIBufBitmap FilPageType = 5
-	PageTypeFSPHDR     FilPageType = 8
-	PageTypeXDES       FilPageType = 9
-	PageTypeIndex      FilPageType = 17855
-	PageTypeSDI        FilPageType = 17853
-)
-
-type FilHeader struct {
-	FilPageSizeOrChecksum uint32
-	FilPageOffset         PageNo
-	FilPagePre            PageNo
-	FilPageNext           PageNo
-	FilPageLSN            uint64
-	FilPageType           FilPageType
-	FilPageFileFlushLSN   uint8
-	FilPageAlgorithmV1    uint8
-	FilPageOriginalTypeV1 uint16
-	FilPageOriginalSizeV1 uint16
-	FilPageCompressSizeV1 uint16
-	FilPageSpaceId        uint32
-}
-type FilTrailer struct {
-	CheckSum uint32
-	Low32LSN uint32
-}
-type FilAddress struct {
-	PageNo PageNo
-	Offset uint16
-}
-type FLSTBaseNode struct {
-	Len         uint32
-	First, Last FilAddress
-}
-type FLSTNode struct {
-	Prev, Next FilAddress
-}
-type FSPHeader struct {
-	FSPSpaceID       uint32
-	FSPNotUse        uint32
-	FSPSize          uint32
-	FSPFreeLimit     uint32
-	FSPSpaceFlags    uint32
-	FSPFragNUsed     uint32
-	FSPFree          FLSTBaseNode
-	FSPFreeFrag      FLSTBaseNode
-	FSPFullFrag      FLSTBaseNode
-	FSPSegID         uint64
-	FSPSegInodesFull FLSTBaseNode
-	FSPSegInodesFree FLSTBaseNode
-}
 type IndexHeader struct {
 	/*Page directory中的slot个数*/
 	PageNDirSlots uint16
@@ -151,39 +81,6 @@ func (i *IndexHeader) String() string {
 		i.PageNDirSlots, i.GetNumOfHeapRecords(), i.GetPageFormat())
 }
 
-type FSegHeader struct {
-	FSegHdrSpace  uint32
-	FSegHdrPageNo uint32
-	FSegHdrOffset uint16
-}
-type PageFormat uint8
-
-const (
-	REDUNDANT PageFormat = iota
-	COMPACT
-)
-
-func (pf PageFormat) String() string {
-	switch pf {
-	case REDUNDANT:
-		return "REDUNDANT"
-	case COMPACT:
-		return "COMPACT"
-	default:
-		return "Unknown"
-	}
-
-}
-
-type SystemRecord struct {
-	RecordHeader
-	Data [8]byte
-}
-type RecordHeader struct {
-	InfoFlagsAndNRecOwned uint8
-	OrderAndRecordType    uint16
-	NextRecordOffset      uint16
-}
 type IndexTop struct {
 	IndexHeader    IndexHeader
 	PageBtrSegLeaf FSegHeader
