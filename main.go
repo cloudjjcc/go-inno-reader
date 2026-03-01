@@ -4,7 +4,7 @@ import (
 	"flag"
 	"os"
 
-	"github.com/go-inno-reader/fileparser"
+	"github.com/go-inno-reader/ibdparser"
 )
 
 var (
@@ -25,5 +25,5 @@ func main() {
 		_ = file.Close()
 	}()
 
-	fileparser.Parse(file)
+	ibdparser.Parse(file)
 }

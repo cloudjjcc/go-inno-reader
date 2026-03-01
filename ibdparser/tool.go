@@ -1,4 +1,4 @@
-package fileparser
+package ibdparser
 
 import (
 	"encoding/binary"
