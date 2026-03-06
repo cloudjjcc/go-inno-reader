@@ -113,7 +113,7 @@ func (p *FspHdrPage) String() string {
 	return sb.String()
 }
 
-func parseFspHdrPage(basePage *BasePage, bodyData []byte) (IPage, error) {
+func parseFspHdrPage(t *Tablespace, basePage *BasePage, bodyData []byte) (IPage, error) {
 	page := &FspHdrPage{
 		BasePage: basePage,
 	}

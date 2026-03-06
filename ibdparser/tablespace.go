@@ -1,7 +1,6 @@
 package ibdparser
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -50,27 +49,22 @@ const (
 	PageTypeIndex                  FilPageType = 17855
 )
 
+var filPageTypeStrings = map[FilPageType]string{
+	PageTypeAllocated:  "Allocated",
+	PageTypeUndoLog:    "UndoLog",
+	PageTypeINode:      "INode",
+	PageTypeIBufBitmap: "IBufBitmap",
+	PageTypeFSPHDR:     "FSPHDR",
+	PageTypeXDES:       "XDES",
+	PageTypeIndex:      "Index",
+	PageTypeSDI:        "SDI",
+}
+
 func (fp FilPageType) String() string {
-	switch fp {
-	case PageTypeAllocated:
-		return "Allocated"
-	case PageTypeUndoLog:
-		return "UndoLog"
-	case PageTypeINode:
-		return "INode"
-	case PageTypeIBufBitmap:
-		return "IBufBitmap"
-	case PageTypeFSPHDR:
-		return "FSPHDR"
-	case PageTypeXDES:
-		return "XDES"
-	case PageTypeIndex:
-		return "Index"
-	case PageTypeSDI:
-		return "SDI"
-	default:
-		return "Unknown"
+	if str, ok := filPageTypeStrings[fp]; ok {
+		return str
 	}
+	return "Unknown"
 }
 
 // FilHeader 表空间页公共头
@@ -83,6 +77,10 @@ type FilHeader struct {
 	FilPageType           FilPageType
 	FilPageFileFlushLSN   uint64
 	FilPageSpaceId        uint32
+}
+
+func (h *FilHeader) GetPageType() FilPageType {
+	return h.FilPageType
 }
 
 // FilTrailer 表空间页公共尾
@@ -156,31 +154,10 @@ func NewRawPage(data []byte) (*RawPage, error) {
 }
 
 type IPage interface {
+	GetPageType() FilPageType
 	GetFilHeader() *FilHeader
 	GetFilTrailer() *FilTrailer
 	fmt.Stringer
-}
-
-func (p *RawPage) ParsePage() (IPage, error) {
-	basePage := p.ParseBasePage()
-	// check LSN
-	if basePage.Low32LSN != uint32(basePage.FilPageLSN&0xffffffff) {
-		fmt.Println("warning:lsn not match")
-	}
-	parser, ok := pageParsers[basePage.FilPageType]
-	if !ok {
-		return nil, fmt.Errorf("not supported page type:%d", basePage.FilPageType)
-	}
-	body := p.data[SizeOfFilHeader : SizeOfPage-SizeOfFilTrailer]
-	return parser(basePage, body)
-}
-
-type pageParser func(basePage *BasePage, bodyData []byte) (IPage, error)
-
-var pageParsers = map[FilPageType]pageParser{}
-
-func registerPageParser(pageType FilPageType, parser pageParser) {
-	pageParsers[pageType] = parser
 }
 
 type BasePage struct {
@@ -197,6 +174,9 @@ func (p *BasePage) GetFilTrailer() *FilTrailer {
 }
 func (p *BasePage) String() string {
 	sb := strings.Builder{}
+	sb.WriteString(fmt.Sprintf("Offset: %d\n", p.FilPageOffset))
+	sb.WriteString(fmt.Sprintf("Pre: %d\n", p.FilPagePre))
+	sb.WriteString(fmt.Sprintf("Next: %d\n", p.FilPageNext))
 	sb.WriteString(fmt.Sprintf("PageType: %s\n", p.FilPageType))
 	sb.WriteString(fmt.Sprintf("SpaceID: %d\n", p.FilPageSpaceId))
 	sb.WriteString(fmt.Sprintf("PageLSN: %d\n", p.FilPageLSN))
@@ -209,11 +189,11 @@ func init() {
 
 var mysqlByteOrder = binary.BigEndian
 
-// ReadRawPageAt 读取指定页的数据
-func ReadRawPageAt(file *os.File, pageNo PageNo) (*RawPage, error) {
+// readRawPageAt 读取指定页的数据
+func (t *Tablespace) readRawPageAt(pageNo PageNo) (*RawPage, error) {
 	offset := int64(pageNo * SizeOfPage)
 	page := make([]byte, SizeOfPage)
-	_, err := file.ReadAt(page, offset)
+	_, err := t.file.ReadAt(page, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -223,43 +203,71 @@ func ReadPageType(page []byte) FilPageType {
 	return FilPageType(mysqlByteOrder.Uint16(page[PageOffsetFilPageType:]))
 }
 
-func Parse(file *os.File) {
-	pageNo := PageNo(0)
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		rawPage, err := ReadRawPageAt(file, pageNo)
-		if err != nil {
-			fmt.Println("read page failed:", err)
-			return
-		}
-		page, err := rawPage.ParsePage()
-		if err != nil {
-			fmt.Println("parse page failed:", err)
-		} else {
-			fmt.Printf("\n--- Page %d ---\n", pageNo)
-			fmt.Print(page)
-		}
+type Tablespace struct {
+	file   *os.File
+	Name   string
+	FspHdr *FspHdrPage
+}
 
-		// print help info
-		fmt.Println("\ninput command(n=next page,p=prev page,q=quit)\n", file.Name())
+func (t *Tablespace) String() string {
+	sb := strings.Builder{}
+	sb.WriteString("====Table Space======\n")
+	sb.WriteString(fmt.Sprintf("Space ID: %d\n", t.FspHdr.FSPSpaceID))
+	sb.WriteString(fmt.Sprintf("Total Pages:%d\n", t.FspHdr.FSPSize))
+	return sb.String()
+}
+func (t *Tablespace) Close() {
+	_ = t.file.Close()
+}
 
-		fmt.Print(">>> ")
-		cmd, _ := reader.ReadString('\n')
-		cmd = strings.TrimSpace(cmd)
-		switch cmd {
-		case "n":
-			pageNo++
-		case "p":
-			if pageNo > 0 {
-				pageNo--
-			} else {
-				fmt.Println("already first page")
-			}
-		case "q":
-			fmt.Println("quit")
-			return
-		default:
-			fmt.Println("unknown command:", cmd)
-		}
+// ReadPage 读取指定数据页
+func (t *Tablespace) ReadPage(pageNo PageNo) (IPage, error) {
+	rawPage, err := t.readRawPageAt(pageNo)
+	if err != nil {
+		return nil, fmt.Errorf("read page %d failed:%w", pageNo, err)
 	}
+	return t.parsePage(rawPage)
+}
+func (t *Tablespace) parsePage(rawPage *RawPage) (IPage, error) {
+	basePage := rawPage.ParseBasePage()
+	// check LSN
+	if basePage.Low32LSN != uint32(basePage.FilPageLSN&0xffffffff) {
+		fmt.Println("warning:lsn not match")
+	}
+	parser, ok := pageParsers[basePage.FilPageType]
+	if !ok {
+		return nil, fmt.Errorf("not supported page type:%d", basePage.FilPageType)
+	}
+	body := rawPage.data[SizeOfFilHeader : SizeOfPage-SizeOfFilTrailer]
+	page, err := parser(t, basePage, body)
+	if err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+func NewTableSpace(file *os.File) (*Tablespace, error) {
+	t := &Tablespace{file: file}
+	if err := t.init(); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+func (t *Tablespace) init() error {
+	page, err := t.ReadPage(0)
+	if err != nil {
+		return fmt.Errorf("read fsp_hdr page failed:" + err.Error())
+	}
+	if page.GetPageType() != PageTypeFSPHDR {
+		return fmt.Errorf("miss fsp_hdr page")
+	}
+	t.FspHdr = page.(*FspHdrPage)
+	return nil
+}
+
+type pageParser func(tableSpace *Tablespace, basePage *BasePage, bodyData []byte) (IPage, error)
+
+var pageParsers = map[FilPageType]pageParser{}
+
+func registerPageParser(pageType FilPageType, parser pageParser) {
+	pageParsers[pageType] = parser
 }

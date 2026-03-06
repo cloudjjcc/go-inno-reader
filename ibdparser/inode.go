@@ -41,7 +41,7 @@ func (p *INodePage) String() string {
 	}
 	return sb.String()
 }
-func parseINodePage(basePage *BasePage, body []byte) (IPage, error) {
+func parseINodePage(t *Tablespace, basePage *BasePage, body []byte) (IPage, error) {
 	page := &INodePage{
 		BasePage:     basePage,
 		INodeEntries: make([]INodeEntry, 0, FspSegInodesPerPage),

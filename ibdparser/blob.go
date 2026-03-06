@@ -23,7 +23,7 @@ type BlobPageHeader struct {
 	Length     uint32
 }
 
-func parseBlobPage(basePage *BasePage, body []byte) (IPage, error) {
+func parseBlobPage(t *Tablespace, basePage *BasePage, body []byte) (IPage, error) {
 	if len(body) < 12 {
 		return nil, fmt.Errorf("body too small for blob page")
 	}

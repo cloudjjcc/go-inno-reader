@@ -41,7 +41,7 @@ func (p *IBufBitmapPage) String() string {
 
 	return sb.String()
 }
-func parseIBufBitmapPage(basePage *BasePage, body []byte) (IPage, error) {
+func parseIBufBitmapPage(t *Tablespace, basePage *BasePage, body []byte) (IPage, error) {
 	page := &IBufBitmapPage{
 		BasePage: basePage,
 		Bitmap:   body,

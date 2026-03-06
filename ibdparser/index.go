@@ -6,9 +6,18 @@ import (
 )
 
 const (
-	SizeOfIndexHeader  = 36
+	SizeOfIndexHeader  = 56
 	SizeOfFSegHeader   = 10
 	SizeOfSystemRecord = 13
+)
+
+type RecordType uint8
+
+const (
+	RecordTypeOrdinary RecordType = 0
+	RecordTypeNodePtr  RecordType = 1
+	RecordTypeInfimum  RecordType = 2
+	RecordTypeSupremum RecordType = 3
 )
 
 func init() {
@@ -25,7 +34,24 @@ type SystemRecord struct {
 type RecordHeader struct {
 	InfoFlagsAndNRecOwned uint8
 	OrderAndRecordType    uint16
-	NextRecordOffset      uint16
+	NextRecordOffset      int16 //下一行记录的相对偏移量
+}
+
+func (rh *RecordHeader) RecordType() RecordType {
+	return RecordType(rh.OrderAndRecordType & 0x7)
+}
+func (rh *RecordHeader) HeapNo() uint16 {
+	return rh.OrderAndRecordType >> 3
+}
+func (rh *RecordHeader) NOwned() uint8 {
+	return rh.InfoFlagsAndNRecOwned & 0x0f
+}
+
+func (rh *RecordHeader) IsMinRec() bool {
+	return rh.InfoFlagsAndNRecOwned&0x10 != 0
+}
+func (rh *RecordHeader) IsDeleted() bool {
+	return rh.InfoFlagsAndNRecOwned&0x20 != 0
 }
 
 type IndexHeader struct {
@@ -80,6 +106,9 @@ type IndexHeader struct {
 	 * 该Page归属的索引ID.
 	 */
 	PageIndexID uint64
+
+	PageBtrSegLeaf FSegHeader
+	PageBtrSegTop  FSegHeader
 }
 
 func (i *IndexHeader) GetNumOfHeapRecords() uint16 {
@@ -93,28 +122,24 @@ func (i *IndexHeader) String() string {
 		i.PageNDirSlots, i.GetNumOfHeapRecords(), i.GetPageFormat())
 }
 
-type IndexTop struct {
-	IndexHeader    IndexHeader
-	PageBtrSegLeaf FSegHeader
-	PageBtrSegTop  FSegHeader
-	Infimum        SystemRecord
-	Supremum       SystemRecord
-}
 type IndexPage struct {
 	*BasePage
-	IndexTop
-	DirSlots []uint16
+	Header      IndexHeader
+	Infimum     SystemRecord
+	Supremum    SystemRecord
+	UserRecords []*UserRecord
+	DirSlots    []uint16
 }
 
 func (p *IndexPage) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(p.BasePage.String())
-	sb.WriteString(fmt.Sprintf("\n%s\n", p.IndexHeader.String()))
-	sb.WriteString(fmt.Sprintf("Level: %d, NumRecords: %d\n", p.IndexHeader.PageLevel, p.IndexHeader.GetNumOfHeapRecords()))
+	sb.WriteString(fmt.Sprintf("\n%s\n", p.Header.String()))
+	sb.WriteString(fmt.Sprintf("Level: %d, NumRecords: %d\n", p.Header.PageLevel, p.Header.GetNumOfHeapRecords()))
 	sb.WriteString(fmt.Sprintf("DirSlots: %d\n", len(p.DirSlots)))
 	return sb.String()
 }
-func parseIndexPage(basePage *BasePage, body []byte) (IPage, error) {
+func parseIndexPage(t *Tablespace, basePage *BasePage, body []byte) (IPage, error) {
 
 	if len(body) < SizeOfIndexHeader+SizeOfFSegHeader*2+2*SizeOfSystemRecord {
 		return nil, fmt.Errorf("index page body too small")
@@ -127,72 +152,129 @@ func parseIndexPage(basePage *BasePage, body []byte) (IPage, error) {
 	offset := 0
 
 	// 解析 IndexHeader
-	page.IndexHeader.PageNDirSlots = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageNDirSlots = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageHeapTop = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageHeapTop = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageNHeap = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageNHeap = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageFree = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageFree = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageGarbage = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageGarbage = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageLastInsert = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageLastInsert = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageDirection = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageDirection = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageNDirection = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageNDirection = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageNRecs = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageNRecs = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageMaxTrxID = mysqlByteOrder.Uint64(body[offset:])
+	page.Header.PageMaxTrxID = mysqlByteOrder.Uint64(body[offset:])
 	offset += 8
-	page.IndexHeader.PageLevel = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageLevel = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.IndexHeader.PageIndexID = mysqlByteOrder.Uint64(body[offset:])
+	page.Header.PageIndexID = mysqlByteOrder.Uint64(body[offset:])
 	offset += 8
 
 	// FSegHeader
-	page.PageBtrSegLeaf.FSegHdrSpace = mysqlByteOrder.Uint32(body[offset:])
+	page.Header.PageBtrSegLeaf.FSegHdrSpace = mysqlByteOrder.Uint32(body[offset:])
 	offset += 4
-	page.PageBtrSegLeaf.FSegHdrPageNo = PageNo(mysqlByteOrder.Uint32(body[offset:]))
+	page.Header.PageBtrSegLeaf.FSegHdrPageNo = PageNo(mysqlByteOrder.Uint32(body[offset:]))
 	offset += 4
-	page.PageBtrSegLeaf.FSegHdrOffset = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageBtrSegLeaf.FSegHdrOffset = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
 
-	page.PageBtrSegTop.FSegHdrSpace = mysqlByteOrder.Uint32(body[offset:])
+	page.Header.PageBtrSegTop.FSegHdrSpace = mysqlByteOrder.Uint32(body[offset:])
 	offset += 4
-	page.PageBtrSegTop.FSegHdrPageNo = PageNo(mysqlByteOrder.Uint32(body[offset:]))
+	page.Header.PageBtrSegTop.FSegHdrPageNo = PageNo(mysqlByteOrder.Uint32(body[offset:]))
 	offset += 4
-	page.PageBtrSegTop.FSegHdrOffset = mysqlByteOrder.Uint16(body[offset:])
+	page.Header.PageBtrSegTop.FSegHdrOffset = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
 
 	// Infimum 系统行
-	copy(page.Infimum.Data[:], body[offset:offset+8])
-	offset += 8
+	infimumOffset := offset
 	page.Infimum.RecordHeader.InfoFlagsAndNRecOwned = body[offset]
 	offset += 1
 	page.Infimum.RecordHeader.OrderAndRecordType = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.Infimum.RecordHeader.NextRecordOffset = mysqlByteOrder.Uint16(body[offset:])
+	page.Infimum.RecordHeader.NextRecordOffset = int16(mysqlByteOrder.Uint16(body[offset:]))
 	offset += 2
+	copy(page.Infimum.Data[:], body[offset:offset+8])
+	offset += 8
+	if page.Infimum.RecordType() != RecordTypeInfimum ||
+		string(page.Infimum.Data[:7]) != "infimum" {
+		fmt.Println("parse infimum failed")
+	}
 
 	// Supremum 系统行
-	copy(page.Supremum.Data[:], body[offset:offset+8])
-	offset += 8
 	page.Supremum.RecordHeader.InfoFlagsAndNRecOwned = body[offset]
 	offset += 1
 	page.Supremum.RecordHeader.OrderAndRecordType = mysqlByteOrder.Uint16(body[offset:])
 	offset += 2
-	page.Supremum.RecordHeader.NextRecordOffset = mysqlByteOrder.Uint16(body[offset:])
+	page.Supremum.RecordHeader.NextRecordOffset = int16(mysqlByteOrder.Uint16(body[offset:]))
 	offset += 2
+	copy(page.Supremum.Data[:], body[offset:offset+8])
+	offset += 8
+	if page.Supremum.RecordType() != RecordTypeSupremum ||
+		string(page.Supremum.Data[:8]) != "supremum" {
+		fmt.Println("parse supremum failed")
+	}
+	offset = infimumOffset + int(page.Infimum.RecordHeader.NextRecordOffset)
+	for {
 
+		rec, next := parseUserRecord(body, uint16(offset))
+		if next == 0 {
+			break
+		}
+		fmt.Println("record offset:", rec.Offset)
+
+		if rec.Header.RecordType() == RecordTypeSupremum {
+			break
+		}
+		page.UserRecords = append(page.UserRecords, rec)
+		offset = int(next)
+	}
 	// 页目录 DirSlots
-	page.DirSlots = make([]uint16, page.IndexHeader.PageNDirSlots)
-	for i := 0; i < int(page.IndexHeader.PageNDirSlots); i++ {
+	offset = len(body) - int(page.Header.PageNDirSlots)*2
+	page.DirSlots = make([]uint16, page.Header.PageNDirSlots)
+	for i := 0; i < int(page.Header.PageNDirSlots); i++ {
 		page.DirSlots[i] = mysqlByteOrder.Uint16(body[offset:])
 		offset += 2
 	}
 
 	return page, nil
 }
+
+type UserRecord struct {
+	Offset uint16
+	Header RecordHeader
+	Data   []byte
+}
+
+func parseUserRecord(body []byte, offset uint16) (*UserRecord, uint16) {
+
+	pos := int(offset)
+
+	rec := &UserRecord{}
+	rec.Offset = offset + SizeOfFilHeader //body去除了fil_header和fil_trailer,这里的offset是页内偏移量
+
+	rec.Header.InfoFlagsAndNRecOwned = body[pos]
+	pos++
+
+	rec.Header.OrderAndRecordType = mysqlByteOrder.Uint16(body[pos:])
+	pos += 2
+
+	rec.Header.NextRecordOffset = int16(mysqlByteOrder.Uint16(body[pos:]))
+	pos += 2
+
+	next := uint16(int16(offset) + rec.Header.NextRecordOffset)
+
+	if int(next) < pos || int(next) > len(body) {
+		return nil, 0
+	}
+	rec.Data = body[pos : pos+20]
+
+	return rec, next
+}
+func parseCompactRow() {}
